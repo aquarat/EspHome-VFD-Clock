@@ -65,7 +65,9 @@ substitutions:
   # Replace characters: Unicode character:Fubata byte (character that already exists on the device: ASCII, decimal, hex, or binary in MSB-LSB order)
   replace: ""
   # Custom characters: Unicode character:column1,column2,column3,column4,column5 (binary painting from bottom to top: can be in decimal or hex too)
-  custom: "°:0,6,9,9,6;₿:62,107,42,107,20;금:117,85,85,85,119;목:55,53,61,53,119;수:20,18,113,18,20;오:34,37,61,37,34;요:34,61,37,61,34;월:38,45,102,72,95;일:18,21,114,64,71;전:121,71,89,68,95;토:95,85,117,85,81;화:22,123,22,127,8;후:38,42,107,42,38;년:31,112,90,74,95"
+  custom: "°:0,6,9,9,6;₿:62,107,42,107,20;금:117,85,85,85,119;목:55,53,61,53,119;수:20,18,113,18,20;오:34,37,61,37,34;요:34,61,37,61,34;월:38,45,102,72,95;일:18,21,114,64,71;전:121,71,89,68,95;토:95,85,117,85,81;화:22,123,22,127,8;후:38,42,107,42,38;년:31,112,90,74,95;🌡:48,126,121,126,48;🧍:48,78,65,78,48;🌢:56,124,127,124,56;🌬:20,84,85,37,2;☂:34,67,63,3,2;⒨:15,121,46,73,14;⒦:15,122,45,72,8"
+  # Side-by-side weather glyphs: 🌡 temperature, 🧍 feels like, 🌢 humidity, 🌬 wind, ☂ rain,
+  # ⒨ mph and ⒦ km/h ("m"/"k" over "h"); keys used by lglstudio_vfd_side.h
 
 packages:
   web_ui: !include lglstudio-vfd-web-${web_ui}.yaml
@@ -77,6 +79,7 @@ esphome:
   includes:
     - lglstudio_vfd_ntp.h
     - lglstudio_vfd_tz.h
+    - lglstudio_vfd_side.h
   project:
     name: "${project_name}"
     version: "${project_version}"
@@ -368,8 +371,8 @@ text_sensor:
       - lambda: |-
           // Use the format "%p%I:%M:%S" (PM01:25:59) and run filters on it to get 오후1:25:59
           if (id(hour12_mode).state == 1) {
-            std::time_t tz1time = (id(my_time).now().timestamp);
-            std::tm *tz1time_astm = localtime(&tz1time);
+            std::tm tz1time_tm = id(my_time).now().to_c_tm(); // local via the global zone; libc localtime() is UTC on ESPHome 2026.10+
+            std::tm *tz1time_astm = &tz1time_tm;
             char display_tmdt[20];
             strftime(display_tmdt, 20, "%p%I:%M:%S", tz1time_astm);
             std::string tmdt(display_tmdt);
@@ -392,8 +395,8 @@ text_sensor:
     filters:
       - lambda: |-
           // Use the format "%Y! %b %d" (2025! May 23) and run filters on it to get 2025년 5월 23일
-          std::time_t tz1time = (id(my_time).now().timestamp);
-          std::tm *tz1time_astm = localtime(&tz1time);
+          std::tm tz1time_tm = id(my_time).now().to_c_tm(); // local via the global zone; libc localtime() is UTC on ESPHome 2026.10+
+          std::tm *tz1time_astm = &tz1time_tm;
           char display_tmdt[20];
           strftime(display_tmdt, 20, "%Y! %b %d", tz1time_astm);
           std::string tmdt(display_tmdt);
@@ -423,8 +426,8 @@ text_sensor:
     filters:
       - lambda: |-
           // Use the format "%a" (Fri) and run filters on it to get 금요일
-          std::time_t tz1time = (id(my_time).now().timestamp);
-          std::tm *tz1time_astm = localtime(&tz1time);
+          std::tm tz1time_tm = id(my_time).now().to_c_tm(); // local via the global zone; libc localtime() is UTC on ESPHome 2026.10+
+          std::tm *tz1time_astm = &tz1time_tm;
           char display_tmdt[20];
           strftime(display_tmdt, 20, "%a", tz1time_astm);
           std::string tmdt(display_tmdt);
@@ -482,6 +485,16 @@ sensor:
       id: weather_feelslike_f
     humidity:
       id: weather_humidity
+    wind_speed_mph:
+      id: weather_wind_mph
+    wind_speed_kmh:
+      id: weather_wind_kmh
+    wind_gusts_mph:
+      id: weather_gusts_mph
+    wind_gusts_kmh:
+      id: weather_gusts_kmh
+    precipitation_mm:
+      id: weather_rain_mm
     update_timestamp:
       id: weather_update_timestamp
 
@@ -637,8 +650,40 @@ display:
               id(message_clock_time_count) += 1;
               id(message_alive_time_count) += 1;
             }
-            std::time_t tz1time = (id(my_time).now().timestamp);
-            std::tm *tz1time_astm = localtime(&tz1time);
+            // Side-by-side: weather carousel on the left, time on the right (lglstudio_vfd_side.h)
+            std::string side;
+            if (id(side_weather).active_index().value_or(0) != 0) {
+              ESPTime now = id(my_time).now();
+              char tm_side[12];
+              now.strftime(tm_side, sizeof(tm_side), id(hour12_mode).state ? "%l:%M%p" : "%H:%M:%S");
+              bool fahrenheit = id(weather_2_temperature_f).state && !id(weather_2_temperature_c).state;
+              bool kmh = id(wind_unit).active_index().value_or(0) == 1;
+              lglstudio_vfd::SideWeather w{
+                  fahrenheit ? id(weather_temperature_f).state : id(weather_temperature_c).state,
+                  fahrenheit ? id(weather_feelslike_f).state : id(weather_feelslike_c).state,
+                  id(weather_humidity).state,
+                  kmh ? id(weather_wind_kmh).state : id(weather_wind_mph).state,
+                  kmh ? id(weather_gusts_kmh).state : id(weather_gusts_mph).state,
+                  id(weather_rain_mm).state, fahrenheit, kmh};
+              // Weather older than an hour is not shown (as in build_weather_message)
+              float ts = id(weather_update_timestamp).state;
+              bool fresh = !std::isnan(ts) && (now.timestamp - (time_t) ts) <= 3600;
+              uint32_t item_s = std::max(1, (int) id(side_item_time).state);
+              if (fresh)
+                side = lglstudio_vfd::side_line(w, id(side_weather).active_index().value_or(0) == 2,
+                                                millis() / 1000 / item_s, tm_side, ${digits});
+              if (side.empty())
+                side = tm_side; // no weather yet: the time alone
+            }
+            if (!side.empty()) {
+              if (lglstudio_vfd::cells(side) >= ${digits}) {
+                it.print(0, side.c_str()); // full line: no centring
+              } else {
+                it.print(side.c_str()); // time only: centred
+              }
+            } else {
+            std::tm tz1time_tm = id(my_time).now().to_c_tm(); // local via the global zone; libc localtime() is UTC on ESPHome 2026.10+
+            std::tm *tz1time_astm = &tz1time_tm;
             char display_tmdt[20];
             // check if the date should be displayed
             if ((id(time_display_count) >= (id(time_display_time).state)) && (id(date_display_mode).state != false)) {
@@ -706,6 +751,7 @@ display:
                 id(message_clock_time) = 0;
               }
             }
+            } // side-by-side
         }
       } else {
         if (!id(display_off)) {
@@ -1225,7 +1271,45 @@ switch:
     entity_category: config
     icon: mdi:water-percent
 
+select:
+  - platform: template
+    name: "Side-by-Side Weather"
+    id: side_weather
+    options:
+      - "Off"
+      - "Temperature + Wind"
+      - "All Weather"
+    initial_option: "Off"
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    icon: mdi:view-split-vertical
+  - platform: template
+    name: "Wind Speed Unit"
+    id: wind_unit
+    options:
+      - "mph"
+      - "km/h"
+    initial_option: "mph"
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    icon: mdi:weather-windy
+
 number:
+  - platform: template
+    name: "Side-by-Side Item Time"
+    id: side_item_time
+    restore_value: true
+    optimistic: true
+    min_value: 1
+    max_value: 30
+    step: 1
+    initial_value: 4
+    mode: box
+    unit_of_measurement: seconds
+    entity_category: config
+    icon: mdi:timer-sync
   - platform: template
     name: "Brightness"
     id: brightness
@@ -1379,7 +1463,7 @@ number:
     step: 0.0001
     min_value: -90
     max_value: 90
-    initial_value: 43.9500
+    initial_value: 51.5072
     mode: box
     unit_of_measurement: °
     set_action:
@@ -1398,7 +1482,7 @@ number:
     step: 0.0001
     min_value: -180
     max_value: 180
-    initial_value: -59.9100
+    initial_value: -0.1276
     mode: box
     unit_of_measurement: °
     set_action:
