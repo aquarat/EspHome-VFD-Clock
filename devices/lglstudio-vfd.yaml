@@ -141,11 +141,13 @@ wifi:
     - button.press: display_ip
 
 external_components:
-# This fork's VFD component (copied next to this YAML by lglstudio-vfd's install.sh)
+# This fork's VFD component, and ESPHome's esp8266 platform with a 256-word flash
+# preferences block instead of 128 (this config needs ~170 words; past the end, settings
+# silently never saved). Both copied next to this YAML by lglstudio-vfd's install.sh.
   - source:
       type: local
       path: lglstudio_vfd_components
-    components: [ vfd ]
+    components: [ vfd, esp8266 ]
 
 # Trip5's RX8025 ESPHome Component (for the RTC), pinned
   - source:
@@ -568,6 +570,7 @@ light:
     name: "Status LED"
     output: statusled
     internal: true
+    restore_mode: ALWAYS_OFF # no saved state: it blinks while seeking Wi-Fi (a flash write every 15 s)
 
 preferences:
   flash_write_interval: 15s # 0 does immediate write to memory with no mem buffer (not recommended) (only saves when persistent variables have changed)
