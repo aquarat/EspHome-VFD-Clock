@@ -6,8 +6,8 @@
 # When deriving the YAML for the LGLV16 Clock, the script checks for certain styles of comments and perform actions.  Check the yaml-derive.py script for more information.
 
 substitutions:
-  name: "vfd16-clock"
-  friendly_name: "VFD16-Clock"
+  name: "lglstudio-vfd"
+  friendly_name: "LGL VFD Clock"
   comment: "EHVClock from Trip5"
   project_name: "Trip5.EspHomeVfdClock"
   project_version: "2026.04.11"
@@ -17,8 +17,12 @@ substitutions:
   # A full list can be viewed here: https://github.com/trip5/timezones.json/blob/master/timezones.md
   # If you need to make a custom POSIX format you can look here: https://developer.ibm.com/articles/au-aix-posix/)
   # or even better, use this POSIX Generator (courtesy of TopYuan): https://www.topyuan.top/posix
-  time_zone: "AST4ADT,M3.2.0,M11.1.0"
-  alt_time_zone: "KST-9"
+  time_zone: "GMT0BST,M3.5.0/1,M10.5.0" # Europe/London
+  alt_time_zone: "UTC0"
+
+  # Default NTP server (ntprat, the house GPS stratum-1); changeable at runtime with the
+  # "NTP Server" text entity (lglstudio_vfd_ntp.h)
+  ntp_server: "192.168.0.21"
 
   # time and date formats: https://esphome.io/components/time/?highlight=strftime#strftime and https://strftime.org/
   # time_format: "%H:%M" (13:25) / "%H:%M:%S" (13:25:59) / "%I:%M%p" (01:25PM) / "%l:%M%p" (1:25PM)
@@ -63,6 +67,9 @@ esphome:
   name: "${name}"
   friendly_name: "${friendly_name}"
   comment: "${comment}"
+  includes:
+    - lglstudio_vfd_ntp.h
+    - lglstudio_vfd_tz.h
   project:
     name: "${project_name}"
     version: "${project_version}"
@@ -74,6 +81,10 @@ esphome:
     - priority: -100
       then:
         - lambda: 'id(ehdp_discovery).publish_state(id(my_ehdp).is_enabled());'
+        # After sntp's setup(): replace its compiled server with the saved one
+        - lambda: |-
+            if (!lglstudio_vfd::apply_ntp_server(id(ntp_server).state))
+              lglstudio_vfd::apply_ntp_server("${ntp_server}");
 
 esp8266:
   board: esp12e
@@ -88,7 +99,7 @@ wifi:
   id: wifi_id
   ap:
     ssid: ${name}
-    password: !secret ap_password
+    password: !secret fallback_ap_password
     ap_timeout: 10s # this has to be short, especially if using Stop Seek Wifi
   on_connect:
     - logger.log: "Wifi connected"
@@ -114,42 +125,31 @@ wifi:
     - button.press: display_ip
 
 external_components:
-# Use Trip5's VFD ESPHome Component (for the Display)
+# This fork's VFD component (copied next to this YAML by lglstudio-vfd's install.sh)
   - source:
-      type: git
-      url: https://github.com/trip5/EspHome-VFD-Clock
-      ref: main
-    refresh: 60s
+      type: local
+      path: lglstudio_vfd_components
     components: [ vfd ]
-# Prefer a local source (only use one source)
-#  - source:
-#      type: local
-#      path: my-components/vfd
-#    components: [ vfd ]
-#    refresh: 1s
 
-# Use Trip5's RX8025 ESPHome Component (for the RTC)
+# Trip5's RX8025 ESPHome Component (for the RTC), pinned
   - source:
       type: git
       url: https://github.com/trip5/esphome-rx8025
-      ref: main
-    refresh: 60s
+      ref: 80dd08000a236c63c6edfd5d107d7570f1e6290e
     components: [ rx8025 ]
 
-# Use Trip5's ehDP (eh Discovery Protocol) ESPHome Component
+# Trip5's ehDP (eh Discovery Protocol) ESPHome Component, pinned
   - source:
       type: git
       url: https://github.com/trip5/ehDP
-      ref: main
-    refresh: 60s
+      ref: 85bc6c615d5b45c11496e4ddb3e085561a0357f3
     components: [ ehdp ]
 
-# Use Trip5's ESPHome-Open-Meteo Component
+# Trip5's ESPHome-Open-Meteo Component, pinned
   - source:
       type: git
       url: https://github.com/trip5/ESPHome-Open-Meteo
-      ref: main
-    refresh: 60s
+      ref: 3b7b856d72e5662c8c6d48c7d6b4613a6e0315d6
     components: [ open_meteo ]
 
 ehdp:
@@ -171,6 +171,8 @@ time:
   - platform: sntp # use SNTP as a time source / do not use Home Assistant!
     id: my_time
     timezone: "${time_zone}"
+    servers: # replaced at boot by the "NTP Server" entity, in every lwIP slot
+      - ${ntp_server}
     update_interval: 24h # This seems like the longest safe amount of time - actual configured update happens in interval section (or when changing time zone)
   - platform: rx8025
     id: rtc_time
@@ -194,15 +196,13 @@ script:
     then:
       - delay: 250ms # need states to stick before updating (helps prevent crashes, too)
       - lambda: |-
+          // ESPHome 2026.10+: one global, pre-parsed zone for every clock (lglstudio_vfd_tz.h)
           if (id(tz_alt_auto).state && !id(alt_timezone).state.empty()) {
-            id(my_time)->set_timezone(id(alt_timezone).state.c_str());
-            id(rtc_time)->set_timezone(id(alt_timezone).state.c_str());
+            lglstudio_vfd::apply_timezone(id(alt_timezone).state);
           } else if (!id(main_timezone).state.empty()) {
-            id(my_time)->set_timezone(id(main_timezone).state.c_str());
-            id(rtc_time)->set_timezone(id(main_timezone).state.c_str());
+            lglstudio_vfd::apply_timezone(id(main_timezone).state);
           } else {
-            id(my_time)->set_timezone(("${time_zone}"));
-            id(rtc_time)->set_timezone("$(time_zone}");
+            lglstudio_vfd::apply_timezone("${time_zone}");
           }
           //id(my_time)->call_setup(); // might be needed?
   - id: display_off_activate
@@ -289,7 +289,7 @@ script:
 api:
   # delete next 2 lines if not using HA API encryption
   encryption:
-    key: !secret encryption_key
+    key: !secret lglstudio_vfd_api_key
   reboot_timeout: 0s # Must be disabled to allow the Wifi enable/disable to function
 
 mdns:
@@ -309,7 +309,7 @@ logger:
 
 web_server:
   port: 80
-  # ota: false # true by default
+  ota: false # the page's /update takes unauthenticated firmware; use the encrypted ESPHome OTA
   include_internal: false # true will expose more than needed to the Web UI
   version: 2 # version 3 is more efficient but cuts off many field names
   # local: true # will download www.js and serve it directly from the clock (may break the Web UI)
@@ -317,7 +317,7 @@ web_server:
 
 ota:
   platform: esphome
-  password: !secret ota_password
+  encryption: {} # reuses the API's Noise key (one secret per device)
   on_begin:
     then:
       - lambda: 'id(vf_display).print("OTA...");'
@@ -814,7 +814,7 @@ globals:
     restore_value: false
     initial_value: '0'
   - id: sync_time_count
-    type: uint8_t
+    type: uint16_t
     restore_value: false
     initial_value: '0'
 # Wifi Stop Seek Variables
@@ -893,11 +893,40 @@ text:
     entity_category: config
     icon: mdi:clock
     disabled_by_default: true
+  - platform: template
+    name: "NTP Server"
+    id: ntp_server
+    optimistic: true
+    min_length: 0
+    max_length: 63
+    mode: text
+    restore_value: true
+    initial_value: "${ntp_server}"
+    on_value:
+      then:
+        - delay: 250ms
+        - lambda: |-
+            if (!lglstudio_vfd::apply_ntp_server(id(ntp_server).state)) {
+              id(reset_ntp_server_text).press();
+            }
+    entity_category: config
+    icon: mdi:server-network
 
 button:
   - platform: template
+    id: reset_ntp_server_text
+    name: "NTP Server Reset to ${ntp_server}"
+    on_press:
+      then:
+        - lambda: |-
+            auto call = id(ntp_server).make_call();
+            call.set_value("${ntp_server}");
+            call.perform();
+    entity_category: config
+    icon: mdi:server-network-off
+  - platform: template
     id: reset_main_timezone_text
-    name: "Main Time Zone Reset to ${time_zone}"
+    name: "Main Time Zone Reset" # the POSIX string has a /, reserved in entity names
     on_press:
       then:
         - lambda: |-
