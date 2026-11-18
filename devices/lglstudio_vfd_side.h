@@ -3,8 +3,9 @@
 // from slot 0 on every print, so printing the halves separately would let the second
 // print overwrite the first one's glyphs.
 //
-// Icons and the one-character wind units are custom 5x7 glyphs; their bitmaps are in the
-// `custom:` substitution of lglstudio-vfd.yaml, keyed by the Unicode characters below.
+// Each item is "<icon> <value> <unit>". Icons and units are one-cell custom 5x7 glyphs
+// (except "%"); their bitmaps are in the `custom:` substitution of lglstudio-vfd.yaml,
+// keyed by the Unicode characters below.
 #pragma once
 
 #include <cmath>
@@ -15,19 +16,25 @@
 namespace lglstudio_vfd {
 
 // Glyph keys (must match the `custom:` substitution)
-static const char *const GLYPH_TEMP = "🌡";        // thermometer, filled
-static const char *const GLYPH_FEELS = "🧍";       // thermometer, hollow ("feels like")
-static const char *const GLYPH_HUMIDITY = "🌢";    // droplet
-static const char *const GLYPH_WIND = "🌬";        // wind streamlines
-static const char *const GLYPH_RAIN = "☂";         // umbrella
-static const char *const GLYPH_MPH = "⒨";          // "m" over "h"
-static const char *const GLYPH_KMH = "⒦";          // "k" over "h"
+static const char *const GLYPH_TEMP = "🌡";      // thermometer, filled
+static const char *const GLYPH_FEELS = "🧍";     // thermometer, hollow ("feels like")
+static const char *const GLYPH_HUMIDITY = "🌢";  // droplet
+static const char *const GLYPH_WIND = "🌬";      // wind streamlines
+static const char *const GLYPH_GUST = "💨";      // wind with an extra streamline
+static const char *const GLYPH_RAIN = "☂";       // umbrella
+static const char *const GLYPH_DEG_C = "℃";
+static const char *const GLYPH_DEG_F = "℉";
+static const char *const GLYPH_MM = "㎜";        // "m" over "m"
+static const char *const GLYPH_MPH = "⒨";        // "m" over "h"
+static const char *const GLYPH_KMH = "⒦";        // "k" over "h"
 
-// Weather values in display units; NAN = unknown (that item is skipped)
+// Weather values in display units (NAN = unknown) and which items are switched on.
+// An item is shown when it is switched on and its value is known.
 struct SideWeather {
   float temp, feels, humidity, wind, gust, rain;
   bool fahrenheit;
   bool kmh;
+  bool show_temp, show_feels, show_humidity, show_wind, show_gust, show_rain;
 };
 
 // Number of display cells: one per UTF-8 code point (each glyph is one cell)
@@ -44,34 +51,37 @@ inline long whole(float v) {
   return r == 0 ? 0 : r;
 }
 
-// all = false: temperature and wind only; true: every item
-inline std::vector<std::string> side_items(const SideWeather &w, bool all) {
+inline std::vector<std::string> side_items(const SideWeather &w) {
   std::vector<std::string> items;
-  char b[32];
-  const char *deg = w.fahrenheit ? "°F" : "°C";
-  const char *unit = w.kmh ? GLYPH_KMH : GLYPH_MPH;
-  if (!std::isnan(w.temp)) {
-    snprintf(b, sizeof(b), "%s%ld%s", GLYPH_TEMP, whole(w.temp), deg);
+  char b[40];
+  const char *deg = w.fahrenheit ? GLYPH_DEG_F : GLYPH_DEG_C;
+  const char *speed = w.kmh ? GLYPH_KMH : GLYPH_MPH;
+  if (w.show_temp && !std::isnan(w.temp)) {
+    snprintf(b, sizeof(b), "%s %ld %s", GLYPH_TEMP, whole(w.temp), deg);
     items.push_back(b);
   }
-  if (all && !std::isnan(w.feels)) {
-    snprintf(b, sizeof(b), "%s%ld%s", GLYPH_FEELS, whole(w.feels), deg);
+  if (w.show_feels && !std::isnan(w.feels)) {
+    snprintf(b, sizeof(b), "%s %ld %s", GLYPH_FEELS, whole(w.feels), deg);
     items.push_back(b);
   }
-  if (all && !std::isnan(w.humidity)) {
-    snprintf(b, sizeof(b), "%s%ld%%", GLYPH_HUMIDITY, whole(w.humidity));
+  if (w.show_humidity && !std::isnan(w.humidity)) {
+    snprintf(b, sizeof(b), "%s %ld %%", GLYPH_HUMIDITY, whole(w.humidity));
     items.push_back(b);
   }
-  if (!std::isnan(w.wind)) {
-    snprintf(b, sizeof(b), "%s%ld%s", GLYPH_WIND, whole(w.wind), unit);
+  if (w.show_wind && !std::isnan(w.wind)) {
+    snprintf(b, sizeof(b), "%s %ld %s", GLYPH_WIND, whole(w.wind), speed);
     items.push_back(b);
   }
-  if (all && !std::isnan(w.gust)) {
-    snprintf(b, sizeof(b), "%sG%ld%s", GLYPH_WIND, whole(w.gust), unit);
+  if (w.show_gust && !std::isnan(w.gust)) {
+    snprintf(b, sizeof(b), "%s %ld %s", GLYPH_GUST, whole(w.gust), speed);
     items.push_back(b);
   }
-  if (all && !std::isnan(w.rain)) {
-    snprintf(b, sizeof(b), "%s%.1fmm", GLYPH_RAIN, w.rain);
+  if (w.show_rain && !std::isnan(w.rain)) {
+    // One decimal below 10 mm; whole numbers above, so the item never touches the time
+    if (w.rain < 9.95f)
+      snprintf(b, sizeof(b), "%s %.1f %s", GLYPH_RAIN, w.rain, GLYPH_MM);
+    else
+      snprintf(b, sizeof(b), "%s %ld %s", GLYPH_RAIN, whole(w.rain), GLYPH_MM);
     items.push_back(b);
   }
   return items;
@@ -79,9 +89,8 @@ inline std::vector<std::string> side_items(const SideWeather &w, bool all) {
 
 // The full line: item `step % items` left-aligned, the time right-aligned, `digits` cells.
 // Empty if there is no weather to show (the caller then shows the time alone).
-inline std::string side_line(const SideWeather &w, bool all, uint32_t step, const std::string &time,
-                             size_t digits) {
-  std::vector<std::string> items = side_items(w, all);
+inline std::string side_line(const SideWeather &w, uint32_t step, const std::string &time, size_t digits) {
+  std::vector<std::string> items = side_items(w);
   if (items.empty())
     return "";
   std::string left = items[step % items.size()];
