@@ -1,0 +1,2 @@
+# No web UI: configure through the Home Assistant API. Selected by web_ui: "off".
+{}

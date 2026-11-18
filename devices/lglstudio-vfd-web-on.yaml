@@ -1,0 +1,8 @@
+# Web UI on port 80 (LAN, no login). Selected by web_ui: "on" in lglstudio-vfd.yaml.
+web_server:
+  port: 80
+  ota: false # the page's /update takes unauthenticated firmware; use the encrypted ESPHome OTA
+  include_internal: false # true will expose more than needed to the Web UI
+  version: 2 # version 3 is more efficient but cuts off many field names
+  # local: true # will download www.js and serve it directly from the clock (may break the Web UI)
+  log: false # disabling in the WebUI to save memory
