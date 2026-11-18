@@ -1,0 +1,1434 @@
+# Derived from EHVClock.yaml with yaml-derive.py for LGLV16 Clock - this file is not the master file
+
+# My github: https://github.com/trip5
+
+# Please note that this file can be hand-edited but thanks to simple machine-readable instructions, can also be passed through a script to generate a derivative YAML
+# When deriving the YAML for the LGLV16 Clock, the script checks for certain styles of comments and perform actions.  Check the yaml-derive.py script for more information.
+
+substitutions:
+  name: "vfd16-clock"
+  friendly_name: "VFD16-Clock"
+  comment: "EHVClock from Trip5"
+  project_name: "Trip5.EspHomeVfdClock"
+  project_version: "2026.04.11"
+  waiting: "EHVClock" # shows when waiting for time
+
+  # Time zone must be POSIX format: (ie "KST-9" & "PST8PDT,M3.2.0/2:00:00,M11.1.0/2:00:00" & "AST4ADT,M3.2.0,M11.1.0")
+  # A full list can be viewed here: https://github.com/trip5/timezones.json/blob/master/timezones.md
+  # If you need to make a custom POSIX format you can look here: https://developer.ibm.com/articles/au-aix-posix/)
+  # or even better, use this POSIX Generator (courtesy of TopYuan): https://www.topyuan.top/posix
+  time_zone: "AST4ADT,M3.2.0,M11.1.0"
+  alt_time_zone: "KST-9"
+
+  # time and date formats: https://esphome.io/components/time/?highlight=strftime#strftime and https://strftime.org/
+  # time_format: "%H:%M" (13:25) / "%H:%M:%S" (13:25:59) / "%I:%M%p" (01:25PM) / "%l:%M%p" (1:25PM)
+  time_format12: "%l:%M:%S%p" # 1:25:59PM
+  time_format24: "%H:%M:%S" # 01:25:59
+
+  # date_format: "%m.%d" (02.28) / "%y.%m.%d" (23.02.28) / "%b %d" (Feb 08) / "%a %d" (Tue 08)
+  # date_formatA, if turned on, will split the time of the date display with the main date (and occur before)
+  date_format: "%B %d" # January 23
+  date_formatA: "%Y %A" # 2025 Friday
+  # Special note that ESPHome can't seem to use any locale for time other than English. In the text_sensors section, you can find filters that allow substitutions.
+  # Please be sure to add those needed characters to the Replace or Custom characters as well, or those special characters will not be displayed!
+
+  # Pins for Display
+  clk_pin: GPIO14
+  mosi_pin: GPIO13
+  cs_pin: GPIO15
+
+  # Pins & config for I2C RTC
+  sda_pin: GPIO4
+  scl_pin: GPIO5
+  rtc_address: "0x32"
+  i2c_frequency: "400kHz"
+
+  # Button & LED Pins
+  status_led_pin: GPIO2 # if you want to use square button, change this to something safe like GPOIO9
+  # button_square_pin: GPIO2 # unusable due to being on the same pin as the LED
+  button_triangle_pin: GPIO0
+  button_circle_pin: GPIO16
+
+  # Display Options
+  digits: "16"
+  intensity: "200" # Initial brightness 0 to 255 (default: 200)
+  remove_spaces: "false" # remove leading or trailing spaces (default: false)
+  scroll_delay: "500, 500" # optional initial & subsequent delays when scrolling (in milliseconds) (default: 1500, 500) (first text = both numbers combined)
+  # Replace characters: Unicode character:Fubata byte (character that already exists on the device: ASCII, decimal, hex, or binary in MSB-LSB order)
+  replace: ""
+  # Custom characters: Unicode character:column1,column2,column3,column4,column5 (binary painting from bottom to top: can be in decimal or hex too)
+  custom: "°:0,6,9,9,6;₿:62,107,42,107,20;금:117,85,85,85,119;목:55,53,61,53,119;수:20,18,113,18,20;오:34,37,61,37,34;요:34,61,37,61,34;월:38,45,102,72,95;일:18,21,114,64,71;전:121,71,89,68,95;토:95,85,117,85,81;화:22,123,22,127,8;후:38,42,107,42,38;년:31,112,90,74,95"
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+  comment: "${comment}"
+  project:
+    name: "${project_name}"
+    version: "${project_version}"
+  on_boot:
+    - priority: 600
+      then:
+        - lambda: 'id(display_off) = false;'
+        - rx8025.read_time:
+    - priority: -100
+      then:
+        - lambda: 'id(ehdp_discovery).publish_state(id(my_ehdp).is_enabled());'
+
+esp8266:
+  board: esp12e
+  restore_from_flash: true
+
+wifi:
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+  reboot_timeout: 0s # reboot if no wifi (must be disabled for wifi to be turned off)
+  enable_on_boot: true
+  id: wifi_id
+  ap:
+    ssid: ${name}
+    password: !secret ap_password
+    ap_timeout: 10s # this has to be short, especially if using Stop Seek Wifi
+  on_connect:
+    - logger.log: "Wifi connected"
+    - light.turn_off: led1
+    - lambda: 'id(wifi_stop_seek_time_count) = 0;'
+    - delay: 2s
+    - if:
+        condition:
+          lambda: 'return id(wifi_ip).state != "192.168.4.1";'
+        then:
+          - button.press: display_ip
+    - script.execute: sync_the_time
+    - script.execute: force_weather_update
+  on_disconnect:
+    - if:
+        condition:
+          - switch.is_on: wifi_stop_seek
+        then:
+          - logger.log: "Wifi disconnected - will be disabled soon (stop seek is on)..."
+        else:
+          - logger.log: "Wifi disconnected"
+    - delay: 1s
+    - button.press: display_ip
+
+external_components:
+# Use Trip5's VFD ESPHome Component (for the Display)
+  - source:
+      type: git
+      url: https://github.com/trip5/EspHome-VFD-Clock
+      ref: main
+    refresh: 60s
+    components: [ vfd ]
+# Prefer a local source (only use one source)
+#  - source:
+#      type: local
+#      path: my-components/vfd
+#    components: [ vfd ]
+#    refresh: 1s
+
+# Use Trip5's RX8025 ESPHome Component (for the RTC)
+  - source:
+      type: git
+      url: https://github.com/trip5/esphome-rx8025
+      ref: main
+    refresh: 60s
+    components: [ rx8025 ]
+
+# Use Trip5's ehDP (eh Discovery Protocol) ESPHome Component
+  - source:
+      type: git
+      url: https://github.com/trip5/ehDP
+      ref: main
+    refresh: 60s
+    components: [ ehdp ]
+
+# Use Trip5's ESPHome-Open-Meteo Component
+  - source:
+      type: git
+      url: https://github.com/trip5/ESPHome-Open-Meteo
+      ref: main
+    refresh: 60s
+    components: [ open_meteo ]
+
+ehdp:
+  material_symbol: "0xe8b5" # Schedule (clock face)
+  id: my_ehdp
+  enable_disable: true
+
+http_request:
+  verify_ssl: false
+
+open_meteo:
+  id: weather
+  latitude: !lambda 'return id(latitude).state;'
+  longitude: !lambda 'return id(longitude).state;'
+  update_interval: 15min  # initial - override by weather_update_interval
+  use_https: false
+
+time:
+  - platform: sntp # use SNTP as a time source / do not use Home Assistant!
+    id: my_time
+    timezone: "${time_zone}"
+    update_interval: 24h # This seems like the longest safe amount of time - actual configured update happens in interval section (or when changing time zone)
+  - platform: rx8025
+    id: rtc_time
+    update_interval: never
+    timezone: "${time_zone}"
+    address: ${rtc_address}
+    battery1.5v: true
+
+script:
+  - id: sync_the_time
+    mode: restart
+    then:
+      - wait_until:
+          condition: wifi.connected
+      - lambda: |-
+          ESP_LOGI("info", "Sync the Time");
+      - lambda: 'id(my_time)->update();'
+      - rx8025.write_time:
+  - id: set_timezone
+    mode: restart
+    then:
+      - delay: 250ms # need states to stick before updating (helps prevent crashes, too)
+      - lambda: |-
+          if (id(tz_alt_auto).state && !id(alt_timezone).state.empty()) {
+            id(my_time)->set_timezone(id(alt_timezone).state.c_str());
+            id(rtc_time)->set_timezone(id(alt_timezone).state.c_str());
+          } else if (!id(main_timezone).state.empty()) {
+            id(my_time)->set_timezone(id(main_timezone).state.c_str());
+            id(rtc_time)->set_timezone(id(main_timezone).state.c_str());
+          } else {
+            id(my_time)->set_timezone(("${time_zone}"));
+            id(rtc_time)->set_timezone("$(time_zone}");
+          }
+          //id(my_time)->call_setup(); // might be needed?
+  - id: display_off_activate
+    mode: restart
+    then:
+      - lambda: |-
+          ESP_LOGI("info", "Display Off activated");
+          id(display_off) = true;
+  - id: display_off_deactivate
+    mode: restart
+    then:
+      - lambda: |-
+          ESP_LOGI("info", "Display Off deactivated");
+          id(display_off_time_count) = 0;
+          id(display_off) = false;
+  - id: force_weather_update
+    mode: restart
+    then:
+      - delay: 10s
+      - component.update: weather
+  - id: build_weather_message
+    mode: restart
+    then:
+      - delay: 100ms
+      - lambda: |-
+          // Check if weather data is stale (> 1 hour old)
+          if (id(my_time).now().is_valid() && !std::isnan(id(weather_update_timestamp).state) &&
+              (id(my_time).now().timestamp - (time_t)id(weather_update_timestamp).state) > 3600) {
+            ESP_LOGI("info", "Weather data is stale, clearing");
+            id(weather_combined).publish_state("");
+            return;
+          }
+          std::string msg = "";
+          char tmpstring[32];
+          // 1. Weather Text
+          if (id(weather_1_text).state && !id(weather_text).state.empty()) {
+            msg += id(weather_text).state;
+            msg += " ";
+          }
+          // 2. Temperature (C or F)
+          if (!std::isnan(id(weather_temperature_c).state) && id(weather_2_temperature_c).state) {
+            snprintf(tmpstring, sizeof(tmpstring), "%.0f°C ", id(weather_temperature_c).state);
+            msg += tmpstring;
+          }
+          if (!std::isnan(id(weather_temperature_f).state) && id(weather_2_temperature_f).state) {
+            snprintf(tmpstring, sizeof(tmpstring), "%.0f°F ", id(weather_temperature_f).state);
+            msg += tmpstring;
+          }
+          // 3. Feels Like (C or F)
+          if (!std::isnan(id(weather_feelslike_c).state) && id(weather_3_apparent_temperature_c).state) {
+            snprintf(tmpstring, sizeof(tmpstring), "Feels Like %.0f°C ", id(weather_feelslike_c).state);
+            msg += tmpstring;
+          }
+          if (!std::isnan(id(weather_feelslike_f).state) && id(weather_3_apparent_temperature_f).state) {
+            snprintf(tmpstring, sizeof(tmpstring), "Feels Like %.0f°F ", id(weather_feelslike_f).state);
+            msg += tmpstring;
+          }
+          // 4. Humidity
+          if (id(weather_4_humidity).state && !std::isnan(id(weather_humidity).state)) {
+            snprintf(tmpstring, sizeof(tmpstring), "Humidity %.0f%% ", id(weather_humidity).state);
+            msg += tmpstring;
+          }
+          // Finish: Remove trailing space if present
+          if (!msg.empty() && msg.back() == ' ') msg.pop_back();
+          // Calculate actual time needed to display
+          if ((int)msg.length() > ${digits}) {
+            int sd[] = {${scroll_delay}};
+            int shifts = (int)msg.length() - ${digits};
+            int time_ms = sd[0] + (shifts + 2) * sd[1];
+            uint8_t calc_time = (uint8_t)((time_ms + 999) / 1000);
+            if (calc_time >= (uint8_t)id(weather_display_time).state) {
+              id(weather_display_time_real) = calc_time;
+            } else {
+              id(weather_display_time_real) = (uint8_t)id(weather_display_time).state;
+            }
+            msg += std::string(4, ' ');
+            id(weather_combined).publish_state(msg);
+          } else {
+            id(weather_combined).publish_state(msg);
+            id(weather_display_time_real) = id(weather_display_time).state;
+          }
+
+# Enable Home Assistant API
+api:
+  # delete next 2 lines if not using HA API encryption
+  encryption:
+    key: !secret encryption_key
+  reboot_timeout: 0s # Must be disabled to allow the Wifi enable/disable to function
+
+mdns:
+  disabled: false # needs to be on to connect to HA
+
+logger:
+  level: NONE
+# Logging is disabled to save memory but you can easily enable logging (and stop the various sensors/switches from spamming the log) by deleting the above line and uncommenting the lines below
+# Note that increasing the level uses up memory (which this device has very little available) and may cause errors and/or crashing - please note it's also disabled in the web_server section
+#  level: DEBUG
+#  logs:
+#    sensor: ERROR
+#    text_sensor: ERROR
+#    switch: NONE
+#    light: NONE
+#    number: ERROR
+
+web_server:
+  port: 80
+  # ota: false # true by default
+  include_internal: false # true will expose more than needed to the Web UI
+  version: 2 # version 3 is more efficient but cuts off many field names
+  # local: true # will download www.js and serve it directly from the clock (may break the Web UI)
+  log: false # disabling in the WebUI to save memory
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+  on_begin:
+    then:
+      - lambda: 'id(vf_display).print("OTA...");'
+      - logger.log: "OTA Update started."
+  on_progress:
+    then:
+      - lambda: 'if (x > 9) { id(vf_display).printf("OTA %d%%", (int)x); }'
+      - logger.log:
+          format: "OTA progress %0.1f%%"
+          args: ["x"]
+  on_end:
+    then:
+      - lambda: 'id(vf_display).print("OTA Done");'
+      - logger.log: "OTA end"
+  on_error:
+    then:
+      - lambda: 'id(vf_display).print("OTAError");'
+      - logger.log:
+          format: "OTA update error %d"
+          args: ["x"]
+
+captive_portal:
+
+improv_serial:
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      id: wifi_ip
+      name: "IP Address"
+      internal: true
+  - platform: template
+    id: project_version
+    name: "${project_name} Version"
+    lambda: 'return {"${project_version}"};'
+    entity_category: diagnostic
+    icon: mdi:github
+    disabled_by_default: true
+  # Below this point are text sensors to hold time and date and allow for substitutions... you can delete/edit the filters, just don't delete the entire text sensor
+  # The github repo should also contain methods to change the time into other localized formats.
+  - platform: template
+    id: time_text
+    name: "Replacement Time Text"
+    entity_category: diagnostic
+    update_interval: never
+    internal: true
+    filters:
+      - lambda: |-
+          // Use the format "%p%I:%M:%S" (PM01:25:59) and run filters on it to get 오후1:25:59
+          if (id(hour12_mode).state == 1) {
+            std::time_t tz1time = (id(my_time).now().timestamp);
+            std::tm *tz1time_astm = localtime(&tz1time);
+            char display_tmdt[20];
+            strftime(display_tmdt, 20, "%p%I:%M:%S", tz1time_astm);
+            std::string tmdt(display_tmdt);
+            return tmdt;
+          } else {
+            return x;
+          }
+      - append: ""
+      - prepend: ""
+      - substitute:
+        - "M0 -> M" # removes leading 0 on Hours
+        - "AM -> 오전"
+        - "PM -> 오후"
+  - platform: template
+    id: date_text
+    name: "Replacement Date Text"
+    entity_category: diagnostic
+    update_interval: never
+    internal: true
+    filters:
+      - lambda: |-
+          // Use the format "%Y! %b %d" (2025! May 23) and run filters on it to get 2025년 5월 23일
+          std::time_t tz1time = (id(my_time).now().timestamp);
+          std::tm *tz1time_astm = localtime(&tz1time);
+          char display_tmdt[20];
+          strftime(display_tmdt, 20, "%Y! %b %d", tz1time_astm);
+          std::string tmdt(display_tmdt);
+          return tmdt;
+      - append: "일"
+      - prepend: ""
+      - substitute:
+        - "! -> 년"
+        - "Jan -> 1월"
+        - "Feb -> 2월"
+        - "Mar -> 3월"
+        - "Apr -> 4월"
+        - "May -> 5월"
+        - "Jun -> 6월"
+        - "Jul -> 7월"
+        - "Aug -> 8월"
+        - "Sep -> 9월"
+        - "Oct -> 10월"
+        - "Nov -> 11월"
+        - "Dec -> 12월"
+  - platform: template
+    id: dateA_text
+    name: "Replacement Date A Text"
+    entity_category: diagnostic
+    update_interval: never
+    internal: true
+    filters:
+      - lambda: |-
+          // Use the format "%a" (Fri) and run filters on it to get 금요일
+          std::time_t tz1time = (id(my_time).now().timestamp);
+          std::tm *tz1time_astm = localtime(&tz1time);
+          char display_tmdt[20];
+          strftime(display_tmdt, 20, "%a", tz1time_astm);
+          std::string tmdt(display_tmdt);
+          return tmdt;
+      - append: "요일"
+      - prepend: ""
+      - substitute:
+        - "Sun -> 일"
+        - "Mon -> 월"
+        - "Tue -> 화"
+        - "Wed -> 수"
+        - "Thu -> 목"
+        - "Fri -> 금"
+        - "Sat -> 토"
+  - platform: open_meteo
+    weather_description:
+      id: weather_text
+      on_value:
+        - script.execute: build_weather_message
+    wind_direction_short:
+      id: weather_wind_direction
+  - platform: template
+    id: weather_combined
+    on_value:
+      lambda: |-
+        if (!id(weather_text).state.empty()) {
+          id(weather_shown).publish_state(x);
+        } else {
+          id(weather_shown).publish_state("Open-Meteo API Offline");
+        }
+  - platform: template
+    name: "Weather"
+    id: weather_shown
+    icon: mdi:weather-cloudy
+    entity_category: diagnostic
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal Strength"
+    id: wifisignal
+    update_interval: 30s
+    unit_of_measurement: "dBm"
+    entity_category: "diagnostic"
+    icon: mdi:wifi
+    disabled_by_default: true
+  - platform: open_meteo
+    id: weather
+    temperature_c:
+      id: weather_temperature_c
+    temperature_f:
+      id: weather_temperature_f
+    apparent_temperature_c:
+      id: weather_feelslike_c
+    apparent_temperature_f:
+      id: weather_feelslike_f
+    humidity:
+      id: weather_humidity
+    update_timestamp:
+      id: weather_update_timestamp
+
+output:
+  - platform: esp8266_pwm
+    id: statusled
+    pin:
+      number: ${status_led_pin}
+      inverted: true
+
+light:
+  - platform: monochromatic
+    id: led1
+    name: "Status LED"
+    output: statusled
+    internal: true
+
+preferences:
+  flash_write_interval: 15s # 0 does immediate write to memory with no mem buffer (not recommended) (only saves when persistent variables have changed)
+
+i2c:
+  sda: ${sda_pin}
+  scl: ${scl_pin}
+  scan: true
+  id: i2cbus
+  frequency: ${i2c_frequency}
+
+spi:
+  clk_pin: ${clk_pin}
+  mosi_pin: ${mosi_pin}
+
+# Some info how to handle multi_click options: https://community.home-assistant.io/t/esphome-button-held-double-press/136083/10
+binary_sensor:
+  - platform: status
+    name: "Status"
+  - platform: gpio
+    pin: 
+      number: ${button_triangle_pin}
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "Button Triangle"
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    on_multi_click:
+      #Click ▲ will toggle Date display mode (or turn screen on again)
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at least 0.5s
+        then:
+          if:
+            condition:
+              - lambda: 'return id(display_off);'
+            then:
+              - script.execute: display_off_deactivate
+            else:
+              - switch.toggle: date_display_mode
+      #Double-Click ▲ will toggle 12-hour mode (or turn screen on again)
+      - timing:
+          - ON for at most 1s
+          - OFF for at most 0.5s
+          - ON for at most 1s
+          - OFF for at least 0.1s
+        then:
+          if:
+            condition:
+              - lambda: 'return id(display_off);'
+            then:
+              - script.execute: display_off_deactivate
+            else:
+              - switch.toggle: hour12_mode
+  - platform: gpio
+    pin: 
+      number: ${button_circle_pin}
+      inverted: true
+    name: "Button Circle"
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    on_multi_click:
+      #Click ⬤ will toggle Alternate Time (or turn screen on again)
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at least 0.5s
+        then:
+          if:
+            condition:
+              - lambda: 'return id(display_off);'
+            then:
+              - script.execute: display_off_deactivate
+            else:
+              - switch.toggle: tz_alt
+      #Double-click ⬤ will show the IP (or other wifi status) (or turn screen on again)
+      - timing:
+          - ON for at most 1s
+          - OFF for at most 0.5s
+          - ON for at most 1s
+          - OFF for at least 0.1s
+        then:
+          if:
+            condition:
+              - lambda: 'return id(display_off);'
+            then:
+              - script.execute: display_off_deactivate
+            else:
+              - button.press: display_ip
+      #Hold ⬤ 5s will toggle the wifi timeout (or turn screen on again)
+      - timing:
+          - ON for at least 5s
+        then:
+          if:
+            condition:
+              - lambda: 'return id(display_off);'
+            then:
+              - script.execute: display_off_deactivate
+            else:
+              - switch.toggle: wifi_stop_seek
+
+display:
+  - platform: vfd
+    id: vf_display
+    digits: ${digits}
+    cs_pin: ${cs_pin}
+    intensity: ${intensity}
+    remove_spaces: ${remove_spaces}
+    scroll_delay: ${scroll_delay}
+    replace: ${replace}
+    custom: ${custom}
+    update_interval: 1s    # Update interval (optional)
+    lambda: |-
+      // Display the message if all conditions are met
+      if (id(my_time).now().is_valid() && !id(display_off)) {
+        if ((id(message_alive_time) != 0) && (id(message_clock_time_count) >= id(message_clock_time))) {
+          ESP_LOGI("info", "Showing Message");
+          id(message_display_time_count) += 1;
+          id(message_alive_time_count) += 1;
+          std::string message_text = id(message);
+          it.print(message_text.c_str());
+          if (id(message_display_time_count) >= id(message_display_time)) {
+            id(message_display_time_count) = 0;
+            id(message_clock_time_count) = 0;
+            if (id(message_alive_time_count) >= id(message_alive_time)) {
+              id(message_alive_time_count) = 0;
+              id(message_alive_time) = 0;
+              ESP_LOGI("info", "Message Alive Time finished.");
+            }
+          }
+        } else {
+          // The extra indent here makes comparing the core clock to the HA version easier
+            if ((id(message_alive_time) != 0) && (id(message_clock_time) != 0)) {
+              id(message_clock_time_count) += 1;
+              id(message_alive_time_count) += 1;
+            }
+            std::time_t tz1time = (id(my_time).now().timestamp);
+            std::tm *tz1time_astm = localtime(&tz1time);
+            char display_tmdt[20];
+            // check if the date should be displayed
+            if ((id(time_display_count) >= (id(time_display_time).state)) && (id(date_display_mode).state != false)) {
+              id(date_display_count) += 1;
+              // if date_formatA is on, display it for 50% of the time first, after the 1st...
+              if ((id(date_A_mode).state == true) && (id(date_display_count) <= (id(date_display_time).state / 2))) {
+                strftime(display_tmdt, 20, "${date_formatA}", tz1time_astm);
+                // check if Date A text replacement should be made
+                if (id(replace_mode_auto).state == true) {
+                  std::string tmdt(display_tmdt);
+                  id(dateA_text).publish_state(tmdt);
+                  strcpy(display_tmdt, id(dateA_text).state.c_str());
+                }
+              } else {
+                strftime(display_tmdt, 20, "${date_format}", tz1time_astm);
+                // check if Date text replacement should be made
+                if (id(replace_mode_auto).state == true) {
+                  std::string tmdt(display_tmdt);
+                  id(date_text).publish_state(tmdt);
+                  strcpy(display_tmdt, id(date_text).state.c_str());
+                }
+              }
+            } else {
+              id(date_display_count) = 0;
+              id(time_display_count) += 1;
+              // choose which time format to display
+              if (id(hour12_mode).state == true) {
+                strftime(display_tmdt, 20, "${time_format12}", tz1time_astm);
+              } else {
+                strftime(display_tmdt, 20, "${time_format24}", tz1time_astm);
+              }
+              // check if Time text replacement should be made
+              if (id(replace_mode_auto).state == true) {
+                std::string tmdt(display_tmdt);
+                id(time_text).publish_state(tmdt);
+                strcpy(display_tmdt, id(time_text).state.c_str());
+              }
+            }
+            // print the date / time
+            // it.printf((32 / 2), (8 / 2), id(default_font), TextAlign::CENTER, "%s", display_tmdt);
+            it.print(display_tmdt);
+            if (((id(date_display_count) >= id(date_display_time).state) && (id(date_display_mode).state != false)) || ((id(time_display_count) >= id(time_display_time).state) && (id(date_display_mode).state == false))) {
+              id(time_display_count) = 0;
+              // check if Replace Interval is active, count or reset, when date display is finished - or after the interval, depending
+              if (id(replace_interval).state > 0) {
+                id(replace_interval_count) += 1;
+                if (id(replace_interval_count) >= id(replace_interval).state) {
+                  id(replace_interval_count) = 0;
+                  if (id(auto_replace_tz_alt).state == true) {
+                    if (id(replace_mode_auto).state == true) {
+                      id(tz_alt_auto).turn_off();
+                    } else {
+                      id(tz_alt_auto).turn_on();
+                    }
+                  }
+                  id(replace_mode_auto).toggle();
+                }
+              }
+              // show the weather (if it's available)
+              if (!id(weather_combined).state.empty()) {
+                // shortcut: use the 'message' which suspends other counting...
+                id(message) = id(weather_combined).state.c_str();
+                id(message_alive_time) = id(weather_display_time_real);
+                id(message_display_time) = id(weather_display_time_real);
+                id(message_clock_time) = 0;
+              }
+            }
+        }
+      } else {
+        if (!id(display_off)) {
+          it.print("${waiting}");
+        }
+      }
+      // This next bit handles the display_off stuff
+      if (id(display_off)) {
+        it.clearscreen();
+        it.intensity(0);
+      } else {
+        it.intensity(id(brightness).state);
+      }
+
+interval:
+  - interval: 1min # check if the time should be synced, and if so, do it
+    then:
+      - lambda: |-
+          id(sync_time_count) += 1;
+          if (id(sync_time_count) >= (id(sync_time).state * 60)) {
+            id(sync_time_count) = 0;
+            id(sync_the_time).execute();
+          }
+  - interval: 1s # check if the wifi should be turned off, and if so, do it (or turn on if stop seek has been disabled) and blink led while seeking wifi / also, check if it's time to turn off display
+    then:
+      - lambda: |-
+          if (id(wifi_stop_seek).state == true && !id(wifi_id).is_connected() && !id(wifi_id).is_disabled()){
+            id(wifi_stop_seek_time_count) += 1;
+            if (id(wifi_stop_seek_time_count) >= id(wifi_stop_seek_time).state) {
+              id(wifi_stop_seek_time_count) = 0;
+              id(wifi_id)->disable();
+              id(display_ip).press();
+            }
+          }
+          if (id(wifi_stop_seek).state == false && id(wifi_id).is_disabled()) {
+            id(wifi_stop_seek_time_count) = 0;
+            id(wifi_id)->enable();
+            id(display_ip).press();
+          }
+          if (!id(wifi_id).is_connected() && !id(wifi_id).is_disabled()) {
+            id(seek_blink_led) += 1;
+            if (id(wifi_stop_seek).state == false) {
+              if (id(seek_blink_led) % 1 == 0) {
+                auto call = id(led1).toggle();
+                call.perform();
+              }
+            } else {
+              if (id(seek_blink_led) % 2 == 0) {
+                auto call = id(led1).toggle();
+                call.perform();
+              }
+            }
+          }
+          if (id(led1).current_values.is_on() && (id(wifi_id).is_connected() || id(wifi_id).is_disabled())) {
+              auto call = id(led1).turn_off();
+              call.perform();
+          }
+          if (id(my_time).now().is_valid() && !id(display_off)) {
+            if (id(display_off_no_wifi_time).state != 0 || id(display_off_time).state != 0) {
+              id(display_off_time_count) = id(display_off_time_count) + 1;
+            }
+            if ((id(display_off_time).state != 0 && id(display_off_time_count) >= (id(display_off_time).state * 60)) || (id(display_off_no_wifi_time).state != 0 && id(display_off_time_count) >= id(display_off_no_wifi_time).state && (!id(wifi_id).is_connected() || id(wifi_id).is_disabled()))) {
+              id(display_off_activate).execute();
+            }
+          }
+
+globals:
+  - id: replace_interval_count
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: message
+    type: std::string
+    restore_value: false
+    initial_value: ''
+  - id: message_display_time
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: message_clock_time
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: message_alive_time
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: message_display_time_count
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: message_clock_time_count
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: message_alive_time_count
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: time_display_count
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: date_display_count
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: sync_time_count
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+# Wifi Stop Seek Variables
+  - id: wifi_stop_seek_time_count
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: seek_blink_led
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+# Display Off Variables
+  - id: display_off
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: display_off_time_count
+    type: uint16_t
+    restore_value: false
+    initial_value: '0'
+# Weather Variable
+  - id: weather_interval_count
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+  - id: weather_display_time_real
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+
+text:
+  - platform: template
+    name: "Main Time Zone POSIX"
+    id: main_timezone
+    optimistic: true
+    min_length: 0
+    max_length: 35
+    mode: text
+    restore_value: true
+    initial_value: "${time_zone}"
+    on_value:
+      then:
+        - delay: 250ms
+        - lambda: |-
+            if (id(main_timezone).state == "") {
+              id(reset_main_timezone_text).press();
+            } else {
+              id(tz_alt).turn_off();
+            }
+        - script.execute: set_timezone
+    entity_category: config
+    icon: mdi:clock
+    disabled_by_default: true
+  - platform: template
+    name: "Alt Time Zone POSIX"
+    id: alt_timezone
+    optimistic: true
+    min_length: 0
+    max_length: 35
+    mode: text
+    restore_value: true
+    initial_value: "${time_zone}"
+    on_value:
+      then:
+        - delay: 250ms
+        - lambda: |-
+            if (id(alt_timezone).state == "") {
+              id(reset_alt_timezone_text).press();
+            }
+            if (id(alt_timezone).state == "${time_zone}") {
+              id(tz_alt).turn_off();
+            } else {
+              id(tz_alt).turn_on();
+            }
+        - script.execute: set_timezone
+    entity_category: config
+    icon: mdi:clock
+    disabled_by_default: true
+
+button:
+  - platform: template
+    id: reset_main_timezone_text
+    name: "Main Time Zone Reset to ${time_zone}"
+    on_press:
+      then:
+        - lambda: |-
+            auto call = id(main_timezone).make_call();
+            call.set_value("${time_zone}");
+            call.perform();
+    entity_category: config
+    icon: mdi:clock-alert
+  - platform: template
+    id: reset_alt_timezone_text
+    name: "Alt Time Zone Reset to ${alt_time_zone}"
+    on_press:
+      then:
+        - lambda: |-
+            auto call = id(alt_timezone).make_call();
+            call.set_value("${alt_time_zone}");
+            call.perform();
+    entity_category: config
+    icon: mdi:clock-alert
+  - platform: template
+    id: display_ip
+    name: "Display IP Address"
+    internal: true
+    entity_category: diagnostic
+    on_press:
+      - if:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - lambda: |-
+                if (id(wifi_id).is_disabled()) {
+                  id(message) = ("Wifi Off");
+                } else {
+                  id(message) = ("No Wifi");
+                }
+                id(message_alive_time) = 3;
+                id(message_display_time) = 3;
+                id(message_clock_time) = 0;
+          else:
+            - lambda: |-
+                id(message) = ("IP:" + id(wifi_ip).state + std::string(8, ' '));
+                id(message_alive_time) = 8;
+                id(message_display_time) = 8;
+                id(message_clock_time) = 0;
+
+switch:
+  - platform: template
+    name: "12 Hour Mode"
+    id: hour12_mode
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "12 Hour Mode On");
+    turn_off_action:
+        - lambda: |-
+            ESP_LOGI("info", "12 Hour Mode Off");
+    entity_category: config
+    icon: mdi:clock-digital
+  - platform: template
+    name: "Date A Mode"
+    id: date_A_mode
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Date A Mode On");
+    turn_off_action:
+        - lambda: |-
+            ESP_LOGI("info", "Date A Mode Off");
+    entity_category: config
+    icon: mdi:calendar-blank-multiple
+  - platform: template
+    name: "Replacement Mode"
+    id: replace_mode
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Replace Mode On");
+            auto call = id(replace_interval).make_call();
+            call.set_value(0);
+            call.perform();
+            id(replace_mode_auto).turn_on();
+    turn_off_action:
+        - lambda: |-
+            ESP_LOGI("info", "Replace Mode Off");
+            id(replace_mode_auto).turn_off();
+    entity_category: config
+    icon: mdi:file-replace
+  - platform: template
+    id: replace_mode_auto
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    internal: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Replace Mode Auto On");
+    turn_off_action:
+        - lambda: |-
+            ESP_LOGI("info", "Replace Mode Auto Off");
+  - platform: template
+    name: "Date Display Mode"
+    id: date_display_mode
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Date on");
+            id(message) = ("Date on");
+            id(message_alive_time) = 1;
+            id(message_display_time) = 1;
+            id(message_clock_time) = 0;
+    turn_off_action:
+        - lambda: |-
+            ESP_LOGI("info", "Date off");
+            id(message) = ("Date off");
+            id(message_alive_time) = 1;
+            id(message_display_time) = 1;
+            id(message_clock_time) = 0;
+    entity_category: config
+    icon: mdi:calendar
+  - platform: template
+    name: "Wifi Stop Seek"
+    id: wifi_stop_seek
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+        - delay: 1s
+        - lambda: |-
+            ESP_LOGI("info", "Wifi Stop Seek on");
+            id(message) = ("StopSeek");
+            id(message_alive_time) = 1;
+            id(message_display_time) = 1;
+            id(message_clock_time) = 0;
+    turn_off_action:
+        - delay: 1s
+        - lambda: |-
+            ESP_LOGI("info", "Wifi Stop Seek off");
+            id(message) = ("Seek...");
+            id(message_alive_time) = 1;
+            id(message_display_time) = 1;
+            id(message_clock_time) = 0;
+    entity_category: config
+    icon: mdi:wifi-off
+  - platform: template
+    name: "Alternate Time"
+    id: tz_alt
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Alt Time Zone On");
+            id(auto_replace_tz_alt).turn_off();
+            id(tz_alt_auto).turn_on();
+    turn_off_action:
+        - lambda: |-
+            ESP_LOGI("info", "Alt Time Zone Off");
+            id(tz_alt_auto).turn_off();
+    entity_category: config
+    icon: mdi:airplane-clock
+  - platform: template
+    id: tz_alt_auto
+    restore_mode: DISABLED
+    optimistic: true
+    internal: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Alt Time Zone Auto On");
+        - script.execute: set_timezone
+    turn_off_action:
+        - lambda: |-
+            ESP_LOGI("info", "Alt Time Zone Auto Off");
+        - script.execute: set_timezone
+  - platform: template
+    name: "Auto Replacement = Alt. Time"
+    id: auto_replace_tz_alt
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Auto Replacement = Alt. Time On");
+            if (id(replace_interval).state == 0) {
+              auto call = id(replace_interval).make_call();
+              call.set_value(1);
+              call.perform();
+            }
+            id(replace_mode).turn_off();
+            id(tz_alt).turn_off();
+    turn_off_action:
+        - lambda: |-
+            ESP_LOGI("info", "Auto Replacement Mode = Alt. Time Off");
+            id(tz_alt_auto).turn_off();
+    entity_category: config
+    icon: mdi:yin-yang
+  - platform: template
+    name: "ehDP Discovery"
+    id: ehdp_discovery
+    optimistic: true
+    turn_on_action:
+      - lambda: id(my_ehdp).enable();
+    turn_off_action:
+      - lambda: id(my_ehdp).disable();
+    entity_category: config
+    icon: mdi:home-variant
+# Weather Toggle Switches
+  - platform: template
+    name: "Weather 1 Text"
+    id: weather_1_text
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    turn_on_action:
+        - lambda: 'ESP_LOGI("info", "Weather Text On");'
+        - script.execute: build_weather_message
+    turn_off_action:
+        - lambda: 'ESP_LOGI("info", "Weather Text Off");'
+        - script.execute: build_weather_message
+    entity_category: config
+    icon: mdi:weather-partly-snowy-rainy
+  - platform: template
+    name: "Weather 2 Temperature °C"
+    id: weather_2_temperature_c
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Weather Temperature °C On");
+            if (id(weather_2_temperature_f).state) id(weather_2_temperature_f).turn_off();
+        - script.execute: build_weather_message
+    turn_off_action:
+        - lambda: |-
+            if (!id(weather_2_temperature_f).state) ESP_LOGI("info", "Weather Temperature °C Off");
+        - script.execute: build_weather_message
+    entity_category: config
+    icon: mdi:temperature-celsius
+  - platform: template
+    name: "Weather 2 Temperature °F"
+    id: weather_2_temperature_f
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Weather Temperature °F On");
+            if (id(weather_2_temperature_c).state) id(weather_2_temperature_c).turn_off();
+        - script.execute: build_weather_message
+    turn_off_action:
+        - lambda: |-
+            if (!id(weather_2_temperature_c).state) ESP_LOGI("info", "Weather Temperature °F Off");
+        - script.execute: build_weather_message
+    entity_category: config
+    icon: mdi:temperature-fahrenheit
+  - platform: template
+    name: "Weather 3 Feels Like °C"
+    id: weather_3_apparent_temperature_c
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Weather Feels Like °C On");
+            if (id(weather_3_apparent_temperature_f).state) id(weather_3_apparent_temperature_f).turn_off();
+        - script.execute: build_weather_message
+    turn_off_action:
+        - lambda: |-
+            if (!id(weather_3_apparent_temperature_f).state) ESP_LOGI("info", "Weather Feels Like °C Off");
+        - script.execute: build_weather_message
+    entity_category: config
+    icon: mdi:temperature-celsius
+  - platform: template
+    name: "Weather 3 Feels Like °F"
+    id: weather_3_apparent_temperature_f
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+        - lambda: |-
+            ESP_LOGI("info", "Weather Feels Like °F On");
+            if (id(weather_3_apparent_temperature_c).state) id(weather_3_apparent_temperature_c).turn_off();
+        - script.execute: build_weather_message
+    turn_off_action:
+        - lambda: |-
+            if (!id(weather_3_apparent_temperature_c).state) ESP_LOGI("info", "Weather Feels Like °F Off");
+        - script.execute: build_weather_message
+    entity_category: config
+    icon: mdi:temperature-fahrenheit
+  - platform: template
+    name: "Weather 4 Humidity"
+    id: weather_4_humidity
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    turn_on_action:
+        - lambda: 'ESP_LOGI("info", "Weather Humidity On");'
+        - script.execute: build_weather_message
+    turn_off_action:
+        - lambda: 'ESP_LOGI("info", "Weather Humidity Off");'
+        - script.execute: build_weather_message
+    entity_category: config
+    icon: mdi:water-percent
+
+number:
+  - platform: template
+    name: "Brightness"
+    id: brightness
+    restore_value: true
+    optimistic: true
+    step: 5
+    min_value: 0
+    max_value: 255
+    initial_value: ${intensity}
+    mode: slider
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Brightness: %.0f", x);
+        - script.execute: display_off_deactivate
+    entity_category: config
+    icon: mdi:brightness-5
+  - platform: template
+    name: "Time Display Time"
+    id: time_display_time
+    restore_value: true
+    optimistic: true
+    step: 1
+    min_value: 1
+    max_value: 60
+    initial_value: 8
+    mode: box
+    unit_of_measurement: seconds
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Time Display Time: %.0f seconds", x);
+    entity_category: config
+    icon: mdi:clock-start
+  - platform: template
+    name: "Date Display Time"
+    id: date_display_time
+    restore_value: true
+    optimistic: true
+    step: 1
+    min_value: 1
+    max_value: 60
+    initial_value: 2
+    mode: box
+    unit_of_measurement: seconds
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Date Display Time: %.0f seconds", x);
+    entity_category: config
+    icon: mdi:calendar-start
+  - platform: template
+    name: "Auto Replacement Interval"
+    id: replace_interval
+    restore_value: true
+    optimistic: true
+    step: 1
+    min_value: 0
+    max_value: 10
+    initial_value: 0
+    mode: box
+    unit_of_measurement: intervals
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Auto Replacement Interval: %.0f", x);
+            if (x > 0) {
+              if (id(replace_mode).state == true) {
+                id(replace_mode).turn_off();
+              }
+            } else {
+              id(replace_mode_auto).turn_off();
+            }
+    entity_category: config
+    icon: mdi:yin-yang
+  - platform: template
+    name: "Time Sync Interval"
+    id: sync_time
+    restore_value: true
+    optimistic: true
+    step: 1
+    min_value: 1
+    max_value: 24
+    initial_value: 8
+    mode: box
+    unit_of_measurement: hours
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Time Sync Interval: %.0f hours", x);
+    entity_category: config
+    icon: mdi:timer-sync
+  - platform: template
+    name: "Wifi Stop Seek Time"
+    id: wifi_stop_seek_time
+    restore_value: true
+    optimistic: true
+    step: 1
+    min_value: 1
+    max_value: 60
+    initial_value: 180
+    mode: box
+    unit_of_measurement: seconds
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Wifi Stop Seek Time: %.0f seconds", x);
+    entity_category: config
+    icon: mdi:wifi-off
+  - platform: template
+    name: "Display Off Time (0 Disable)"
+    id: display_off_time
+    restore_value: true
+    optimistic: true
+    step: 5
+    min_value: 0
+    max_value: 60
+    initial_value: 0
+    mode: box
+    unit_of_measurement: minutes
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Display Off Time: %.0f minutes", x);
+        - script.execute: display_off_deactivate
+    entity_category: config
+    icon: mdi:lightbulb-off
+  - platform: template
+    name: "Display Off When No Wifi Time (0 Disable)"
+    id: display_off_no_wifi_time
+    restore_value: true
+    optimistic: true
+    step: 5
+    min_value: 0
+    max_value: 180
+    initial_value: 0
+    mode: box
+    unit_of_measurement: seconds
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Display Off No Wifi Time: %.0f seconds", x);
+        - script.execute: display_off_deactivate
+    entity_category: config
+    icon: mdi:lightbulb-off
+  - platform: template
+    name: "Weather Latitude"
+    id: latitude
+    restore_value: true
+    optimistic: true
+    step: 0.0001
+    min_value: -90
+    max_value: 90
+    initial_value: 43.9500
+    mode: box
+    unit_of_measurement: °
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Latitude: %.4f°", x);
+            id(weather).set_latitude([x](){ return x; });
+        - script.execute: force_weather_update
+    entity_category: config
+    icon: mdi:latitude
+  - platform: template
+    name: "Weather Longitude"
+    id: longitude
+    restore_value: true
+    optimistic: true
+    step: 0.0001
+    min_value: -180
+    max_value: 180
+    initial_value: -59.9100
+    mode: box
+    unit_of_measurement: °
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Longitude: %.4f°", x);
+            id(weather).set_longitude([x](){ return x; });
+        - script.execute: force_weather_update
+    entity_category: config
+    icon: mdi:longitude
+  - platform: template
+    name: "Weather Update Interval"
+    id: weather_update_interval
+    restore_value: true
+    optimistic: true
+    step: 1
+    min_value: 10
+    max_value: 60
+    initial_value: 10
+    mode: box
+    unit_of_measurement: minutes
+    on_value:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Weather Update Interval: %.0f minutes", x);
+            id(weather).set_update_interval(x * 60000);
+    entity_category: config
+    icon: mdi:radar
+  - platform: template
+    name: "Weather Display Time"
+    id: weather_display_time
+    restore_value: true
+    optimistic: true
+    step: 1
+    min_value: 1
+    max_value: 60
+    initial_value: 1
+    mode: box
+    unit_of_measurement: seconds
+    on_value:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Weather Display Time: %.0f seconds", x);
+    entity_category: config
+    icon: mdi:weather-cloudy-clock
+  - platform: template
+    name: "Weather Intervals"
+    id: weather_interval
+    restore_value: true
+    optimistic: true
+    step: 1
+    min_value: 1
+    max_value: 10
+    initial_value: 1
+    mode: box
+    unit_of_measurement: intervals
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGI("info", "Weather Intervals: %.0f", x);
+    entity_category: config
+    icon: mdi:weather-cloudy-clock
