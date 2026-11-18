@@ -81,6 +81,7 @@ esphome:
     - lglstudio_vfd_ntp.h
     - lglstudio_vfd_tz.h
     - lglstudio_vfd_side.h
+    - lglstudio_vfd_auto.h
   project:
     name: "${project_name}"
     version: "${project_version}"
@@ -96,6 +97,10 @@ esphome:
         - lambda: |-
             if (!lglstudio_vfd::apply_ntp_server(id(ntp_server).state))
               lglstudio_vfd::apply_ntp_server("${ntp_server}");
+        # The sun (auto brightness) follows the weather location
+        - lambda: |-
+            id(sun_pos).set_latitude(id(latitude).state);
+            id(sun_pos).set_longitude(id(longitude).state);
 
 esp8266:
   board: esp12e
@@ -191,6 +196,14 @@ time:
     timezone: "${time_zone}"
     address: ${rtc_address}
     battery1.5v: true
+
+# Sunrise/sunset for auto brightness, computed on the device. The location here is replaced
+# at boot (and on change) by the Weather Latitude/Longitude entities.
+sun:
+  id: sun_pos
+  time_id: my_time
+  latitude: 51.5072°
+  longitude: -0.1276°
 
 script:
   - id: sync_the_time
@@ -348,6 +361,16 @@ captive_portal:
 improv_serial:
 
 text_sensor:
+  - platform: sun
+    name: "Next Sunrise"
+    type: sunrise
+    format: "%H:%M"
+    entity_category: diagnostic
+  - platform: sun
+    name: "Next Sunset"
+    type: sunset
+    format: "%H:%M"
+    entity_category: diagnostic
   - platform: wifi_info
     ip_address:
       id: wifi_ip
@@ -466,6 +489,39 @@ text_sensor:
     entity_category: diagnostic
 
 sensor:
+  - platform: template
+    name: "Current Brightness"
+    id: current_brightness
+    lambda: 'return id(auto_brightness).state ? id(auto_brightness_level) : id(brightness).state;'
+    update_interval: 60s
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    icon: mdi:brightness-percent
+# Home Assistant's home location (zone.home), used while "Use Home Assistant Location" is on
+  - platform: homeassistant
+    id: ha_latitude
+    entity_id: zone.home
+    attribute: latitude
+    internal: true
+    on_value:
+      - lambda: |-
+          if (id(use_ha_location).state && !std::isnan(x) && fabsf(x - id(latitude).state) > 0.00005f) {
+            auto call = id(latitude).make_call();
+            call.set_value(x);
+            call.perform();
+          }
+  - platform: homeassistant
+    id: ha_longitude
+    entity_id: zone.home
+    attribute: longitude
+    internal: true
+    on_value:
+      - lambda: |-
+          if (id(use_ha_location).state && !std::isnan(x) && fabsf(x - id(longitude).state) > 0.00005f) {
+            auto call = id(longitude).make_call();
+            call.set_value(x);
+            call.perform();
+          }
   - platform: wifi_signal
     name: "WiFi Signal Strength"
     id: wifisignal
@@ -765,10 +821,32 @@ display:
         it.clearscreen();
         it.intensity(0);
       } else {
-        it.intensity(id(brightness).state);
+        it.intensity(id(auto_brightness).state ? id(auto_brightness_level) : id(brightness).state);
       }
 
 interval:
+  - interval: 10s # auto brightness: day/night levels ramped at sunrise/sunset (lglstudio_vfd_auto.h)
+    then:
+      - lambda: |-
+          ESPTime now = id(my_time).utcnow();
+          if (!now.is_valid())
+            return;
+          // Events of yesterday .. the day after tomorrow (UTC days); sunrise()/sunset() with a
+          // date give that day's event (or the next one)
+          time_t rises[4], sets[4];
+          time_t midnight = now.timestamp - now.timestamp % 86400;
+          for (int i = 0; i < 4; i++) {
+            ESPTime day = ESPTime::from_epoch_utc(midnight + (i - 1) * 86400);
+            auto rise = id(sun_pos).sunrise(day, -0.83333);
+            auto set = id(sun_pos).sunset(day, -0.83333);
+            rises[i] = rise.has_value() ? rise->timestamp : 0;
+            sets[i] = set.has_value() ? set->timestamp : 0;
+          }
+          float f = lglstudio_vfd::daylight_factor(
+              now.timestamp, rises, 4, sets, 4, (int32_t) id(sunrise_offset).state * 60,
+              (int32_t) id(sunset_offset).state * 60, (int32_t) id(brightness_ramp).state * 60,
+              id(sun_pos).is_above_horizon());
+          id(auto_brightness_level) = lglstudio_vfd::auto_level(f, id(brightness_day).state, id(brightness_night).state);
   - interval: 1min # check if the time should be synced, and if so, do it
     then:
       - lambda: |-
@@ -821,6 +899,10 @@ interval:
           }
 
 globals:
+  - id: auto_brightness_level # set by the auto brightness interval
+    type: uint8_t
+    restore_value: false
+    initial_value: '${intensity}'
   - id: replace_interval_count
     type: uint8_t
     restore_value: false
@@ -1022,6 +1104,31 @@ button:
                 id(message_clock_time) = 0;
 
 switch:
+  - platform: template
+    name: "Auto Brightness"
+    id: auto_brightness
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    icon: mdi:brightness-auto
+  - platform: template
+    name: "Use Home Assistant Location"
+    id: use_ha_location
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    icon: mdi:home-map-marker
+    on_turn_on:
+      - lambda: |-
+          // Apply HA's location now rather than at its next change
+          if (!std::isnan(id(ha_latitude).state) && !std::isnan(id(ha_longitude).state)) {
+            auto lat = id(latitude).make_call();
+            lat.set_value(id(ha_latitude).state);
+            lat.perform();
+            auto lon = id(longitude).make_call();
+            lon.set_value(id(ha_longitude).state);
+            lon.perform();
+          }
 # Side-by-side: weather carousel left, time right (lglstudio_vfd_side.h). Each item has its own
 # switch; switched-off items are left out of the carousel.
   - platform: template
@@ -1338,6 +1445,71 @@ select:
     icon: mdi:weather-windy
 
 number:
+# Auto brightness (switch "Auto Brightness"): the ramp up starts at sunrise + Sunrise Offset,
+# the ramp down at sunset + Sunset Offset; each takes Brightness Ramp Time.
+  - platform: template
+    name: "Brightness Day"
+    id: brightness_day
+    restore_value: true
+    optimistic: true
+    min_value: 0
+    max_value: 255
+    step: 5
+    initial_value: 200
+    mode: slider
+    entity_category: config
+    icon: mdi:brightness-7
+  - platform: template
+    name: "Brightness Night"
+    id: brightness_night
+    restore_value: true
+    optimistic: true
+    min_value: 0
+    max_value: 255
+    step: 5
+    initial_value: 40
+    mode: slider
+    entity_category: config
+    icon: mdi:brightness-3
+  - platform: template
+    name: "Sunrise Offset"
+    id: sunrise_offset
+    restore_value: true
+    optimistic: true
+    min_value: -240
+    max_value: 240
+    step: 5
+    initial_value: 0
+    mode: box
+    unit_of_measurement: min
+    entity_category: config
+    icon: mdi:weather-sunset-up
+  - platform: template
+    name: "Sunset Offset"
+    id: sunset_offset
+    restore_value: true
+    optimistic: true
+    min_value: -240
+    max_value: 240
+    step: 5
+    initial_value: 0
+    mode: box
+    unit_of_measurement: min
+    entity_category: config
+    icon: mdi:weather-sunset-down
+  - platform: template
+    name: "Brightness Ramp Time"
+    id: brightness_ramp
+    restore_value: true
+    optimistic: true
+    min_value: 0
+    max_value: 240
+    step: 5
+    initial_value: 30
+    mode: box
+    unit_of_measurement: min
+    entity_category: config
+    icon: mdi:chart-line-variant
   - platform: template
     name: "Side-by-Side Item Time"
     id: side_item_time
@@ -1512,6 +1684,7 @@ number:
         - lambda: |-
             ESP_LOGI("info", "Latitude: %.4f°", x);
             id(weather).set_latitude([x](){ return x; });
+            id(sun_pos).set_latitude(x);
         - script.execute: force_weather_update
     entity_category: config
     icon: mdi:latitude
@@ -1531,6 +1704,7 @@ number:
         - lambda: |-
             ESP_LOGI("info", "Longitude: %.4f°", x);
             id(weather).set_longitude([x](){ return x; });
+            id(sun_pos).set_longitude(x);
         - script.execute: force_weather_update
     entity_category: config
     icon: mdi:longitude
